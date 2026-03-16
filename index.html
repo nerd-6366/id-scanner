@@ -364,81 +364,136 @@ function setMode(mode) {
 }
 
 let videoStream = null;
+let quaggaStarted = false;
 
 function startCamera() {
   if (cameraRunning) return;
   const wrap = document.getElementById('camera-wrap');
   wrap.innerHTML = '';
 
+  // --- video element (critical mobile attrs) ---
   const video = document.createElement('video');
-  video.setAttribute('autoplay', '');
-  video.setAttribute('playsinline', '');
-  video.setAttribute('muted', '');
-  video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;display:block;z-index:1';
+  video.autoplay = true;
+  video.playsInline = true;   // REQUIRED on iOS/Android — prevents fullscreen takeover
+  video.muted = true;
+  video.controls = false;
+  video.setAttribute('playsinline', '');     // belt-and-suspenders for older WebKit
+  video.setAttribute('webkit-playsinline', '');
+  video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;display:block;z-index:1;background:#000';
   wrap.appendChild(video);
 
+  // --- scan frame overlay ---
   const overlay = document.createElement('div');
   overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:3';
   overlay.innerHTML = '<div class="scan-rect"><div class="c-bl"></div><div class="c-br"></div><div class="scan-line"></div></div>';
   wrap.appendChild(overlay);
 
+  // --- status label ---
   const statusEl = document.createElement('div');
   statusEl.className = 'cam-status';
-  statusEl.style.zIndex = '3';
+  statusEl.style.zIndex = '4';
   statusEl.textContent = 'Starting camera...';
   wrap.appendChild(statusEl);
 
-  navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-  }).then(stream => {
-    videoStream = stream;
-    video.srcObject = stream;
-    video.play();
-    statusEl.textContent = 'Align barcode in the frame';
-    cameraRunning = true;
+  // --- try back camera first, fall back to any camera ---
+  const constraints = [
+    { video: { facingMode: { exact: 'environment' } } },   // rear camera (strict)
+    { video: { facingMode: 'environment' } },               // rear camera (soft)
+    { video: true },                                         // any camera
+  ];
 
-    Quagga.init({
-      inputStream: {
-        name: 'Live',
-        type: 'LiveStream',
-        target: video,
-        constraints: { facingMode: 'environment' },
-      },
-      decoder: { readers: ['code_128_reader', 'ean_reader', 'code_39_reader', 'upc_reader'] },
-      locate: true,
-      numOfWorkers: navigator.hardwareConcurrency > 2 ? 2 : 1,
-      frequency: 8,
-    }, err => {
-      if (!err) Quagga.start();
+  function tryConstraint(index) {
+    if (index >= constraints.length) {
+      statusEl.textContent = 'Camera unavailable — use Manual Entry';
+      statusEl.style.color = '#ff4d4d';
+      return;
+    }
+    navigator.mediaDevices.getUserMedia(constraints[index])
+      .then(stream => {
+        videoStream = stream;
+        video.srcObject = stream;
+
+        // play() returns a Promise on mobile — must handle it
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          playPromise.then(() => {
+            statusEl.textContent = 'Align barcode in the frame';
+            cameraRunning = true;
+            startQuagga(video, statusEl);
+          }).catch(() => {
+            // Autoplay blocked — add a tap-to-start button
+            showTapToStart(wrap, video, statusEl);
+          });
+        } else {
+          statusEl.textContent = 'Align barcode in the frame';
+          cameraRunning = true;
+          startQuagga(video, statusEl);
+        }
+      })
+      .catch(() => tryConstraint(index + 1));
+  }
+
+  tryConstraint(0);
+}
+
+function showTapToStart(wrap, video, statusEl) {
+  const tapBtn = document.createElement('button');
+  tapBtn.textContent = 'Tap to start camera';
+  tapBtn.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;background:rgba(0,0,0,0.7);color:#fff;border:none;font-size:16px;font-weight:600;cursor:pointer;z-index:5';
+  wrap.appendChild(tapBtn);
+  tapBtn.onclick = () => {
+    video.play().then(() => {
+      tapBtn.remove();
+      statusEl.textContent = 'Align barcode in the frame';
+      cameraRunning = true;
+      startQuagga(video, statusEl);
     });
+  };
+}
 
-    Quagga.onDetected(result => {
-      if (scanCooldown || currentScreen !== 'scan') return;
-      const code = result.codeResult.code;
-      if (!code || code.length < 3) return;
-      scanCooldown = true;
-      if (navigator.vibrate) navigator.vibrate(80);
-      statusEl.textContent = 'Scanned: ' + code;
-      statusEl.style.color = 'var(--accent)';
-      setTimeout(() => {
-        statusEl.textContent = 'Align barcode in the frame';
-        statusEl.style.color = '';
-        scanCooldown = false;
-      }, 2500);
-      handleLookup(code);
-    });
+function startQuagga(video, statusEl) {
+  if (quaggaStarted) return;
+  quaggaStarted = true;
 
-  }).catch(err => {
-    statusEl.textContent = 'Camera blocked — allow access or use Manual Entry';
-    statusEl.style.color = '#ff4d4d';
-    video.remove();
-    console.warn('Camera error:', err);
+  Quagga.init({
+    inputStream: {
+      name: 'Live',
+      type: 'LiveStream',
+      target: video,
+      constraints: { facingMode: 'environment' },
+    },
+    decoder: {
+      readers: ['code_128_reader', 'ean_reader', 'code_39_reader', 'upc_reader', 'upc_e_reader'],
+    },
+    locate: true,
+    numOfWorkers: 1,
+    frequency: 6,
+  }, err => {
+    if (!err) Quagga.start();
+    // Video still shows even if Quagga fails
+  });
+
+  Quagga.onDetected(result => {
+    if (scanCooldown || currentScreen !== 'scan') return;
+    const code = result.codeResult.code;
+    if (!code || code.length < 3) return;
+    scanCooldown = true;
+    if (navigator.vibrate) navigator.vibrate([80]);
+    statusEl.textContent = 'Scanned: ' + code;
+    statusEl.style.color = 'var(--accent)';
+    setTimeout(() => {
+      statusEl.textContent = 'Align barcode in the frame';
+      statusEl.style.color = '';
+      scanCooldown = false;
+    }, 2500);
+    handleLookup(code);
   });
 }
 
 function stopCamera() {
   if (!cameraRunning) return;
   try { Quagga.stop(); } catch {}
+  quaggaStarted = false;
   if (videoStream) {
     videoStream.getTracks().forEach(t => t.stop());
     videoStream = null;
