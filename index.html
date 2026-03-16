@@ -50,9 +50,9 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
 .mode-btn svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 
 /* Camera */
-#camera-wrap{position:relative;border-radius:var(--radius);overflow:hidden;background:#000;aspect-ratio:4/3;margin-bottom:16px;min-height:200px}
-#camera-wrap video{position:absolute!important;top:0!important;left:0!important;width:100%!important;height:100%!important;object-fit:cover!important;display:block!important;visibility:visible!important;opacity:1!important;z-index:1}
-#camera-wrap canvas{position:absolute!important;top:0!important;left:0!important;width:100%!important;height:100%!important;display:block!important;visibility:visible!important;opacity:0!important;z-index:2}
+#camera-wrap{position:relative;border-radius:var(--radius);background:#000;margin-bottom:16px;width:100%;height:260px;overflow:hidden}
+#cam-video{position:absolute!important;top:0!important;left:0!important;width:100%!important;height:100%!important;object-fit:cover!important;display:block!important;visibility:visible!important;opacity:1!important;z-index:1!important;-webkit-transform:translateZ(0);transform:translateZ(0)}
+#camera-wrap canvas{display:none!important;opacity:0!important;visibility:hidden!important;pointer-events:none!important}
 #camera-wrap .drawingBuffer{opacity:0!important}
 .scan-frame-overlay{z-index:3}
 .scan-frame-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
@@ -169,12 +169,14 @@ html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--text);fon
       <!-- Camera panel -->
       <div id="panel-camera">
         <div id="camera-wrap">
-          <div class="cam-starting" id="cam-starting">
-            <div class="spinner"></div>
-            <span>Starting camera…</span>
+          <video id="cam-video" autoplay playsinline muted webkit-playsinline x5-playsinline x5-video-player-type="h5" x5-video-player-fullscreen="false"></video>
+          <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:3">
+            <div class="scan-rect"><div class="c-bl"></div><div class="c-br"></div><div class="scan-line"></div></div>
           </div>
-        </div>
-        <div class="scan-frame-overlay" style="pointer-events:none;position:relative;margin-top:-100%;height:0">
+          <div id="cam-status" class="cam-status" style="z-index:4">Align barcode in the frame</div>
+          <div id="cam-loading" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:5;background:#000">
+            <div class="spinner"></div><span style="color:#888;font-size:13px">Starting camera...</span>
+          </div>
         </div>
       </div>
 
@@ -368,42 +370,21 @@ let quaggaStarted = false;
 
 function startCamera() {
   if (cameraRunning) return;
-  const wrap = document.getElementById('camera-wrap');
-  wrap.innerHTML = '';
 
-  // --- video element (critical mobile attrs) ---
-  const video = document.createElement('video');
-  video.autoplay = true;
-  video.playsInline = true;   // REQUIRED on iOS/Android — prevents fullscreen takeover
-  video.muted = true;
-  video.controls = false;
-  video.setAttribute('playsinline', '');     // belt-and-suspenders for older WebKit
-  video.setAttribute('webkit-playsinline', '');
-  video.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover;display:block;z-index:1;background:#000';
-  wrap.appendChild(video);
+  // video is already in DOM as a static element — just grab it
+  const video = document.getElementById('cam-video');
+  const statusEl = document.getElementById('cam-status');
+  const loading = document.getElementById('cam-loading');
 
-  // --- scan frame overlay ---
-  const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:3';
-  overlay.innerHTML = '<div class="scan-rect"><div class="c-bl"></div><div class="c-br"></div><div class="scan-line"></div></div>';
-  wrap.appendChild(overlay);
-
-  // --- status label ---
-  const statusEl = document.createElement('div');
-  statusEl.className = 'cam-status';
-  statusEl.style.zIndex = '4';
-  statusEl.textContent = 'Starting camera...';
-  wrap.appendChild(statusEl);
-
-  // --- try back camera first, fall back to any camera ---
   const constraints = [
-    { video: { facingMode: { exact: 'environment' } } },   // rear camera (strict)
-    { video: { facingMode: 'environment' } },               // rear camera (soft)
-    { video: true },                                         // any camera
+    { video: { facingMode: { exact: 'environment' } } },
+    { video: { facingMode: 'environment' } },
+    { video: true },
   ];
 
   function tryConstraint(index) {
     if (index >= constraints.length) {
+      if (loading) loading.style.display = 'none';
       statusEl.textContent = 'Camera unavailable — use Manual Entry';
       statusEl.style.color = '#ff4d4d';
       return;
@@ -411,23 +392,27 @@ function startCamera() {
     navigator.mediaDevices.getUserMedia(constraints[index])
       .then(stream => {
         videoStream = stream;
+        // Assign srcObject AFTER element is in DOM (critical for Android)
         video.srcObject = stream;
+        video.setAttribute('playsinline', '');
+        video.setAttribute('webkit-playsinline', '');
+        video.muted = true;
 
-        // play() returns a Promise on mobile — must handle it
-        const playPromise = video.play();
-        if (playPromise !== undefined) {
-          playPromise.then(() => {
-            statusEl.textContent = 'Align barcode in the frame';
-            cameraRunning = true;
-            startQuagga(video, statusEl);
-          }).catch(() => {
-            // Autoplay blocked — add a tap-to-start button
-            showTapToStart(wrap, video, statusEl);
-          });
-        } else {
+        const p = video.play();
+        const onPlaying = () => {
+          if (loading) loading.style.display = 'none';
           statusEl.textContent = 'Align barcode in the frame';
           cameraRunning = true;
           startQuagga(video, statusEl);
+        };
+
+        if (p !== undefined) {
+          p.then(onPlaying).catch(() => {
+            // Autoplay blocked — show tap button
+            if (loading) loading.innerHTML = '<button onclick="tapToPlay()" style="background:var(--accent);color:#000;border:none;border-radius:10px;padding:14px 28px;font-size:15px;font-weight:700;cursor:pointer">Tap to Start Camera</button>';
+          });
+        } else {
+          onPlaying();
         }
       })
       .catch(() => tryConstraint(index + 1));
@@ -436,19 +421,16 @@ function startCamera() {
   tryConstraint(0);
 }
 
-function showTapToStart(wrap, video, statusEl) {
-  const tapBtn = document.createElement('button');
-  tapBtn.textContent = 'Tap to start camera';
-  tapBtn.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;background:rgba(0,0,0,0.7);color:#fff;border:none;font-size:16px;font-weight:600;cursor:pointer;z-index:5';
-  wrap.appendChild(tapBtn);
-  tapBtn.onclick = () => {
-    video.play().then(() => {
-      tapBtn.remove();
-      statusEl.textContent = 'Align barcode in the frame';
-      cameraRunning = true;
-      startQuagga(video, statusEl);
-    });
-  };
+function tapToPlay() {
+  const video = document.getElementById('cam-video');
+  const statusEl = document.getElementById('cam-status');
+  const loading = document.getElementById('cam-loading');
+  video.play().then(() => {
+    if (loading) loading.style.display = 'none';
+    statusEl.textContent = 'Align barcode in the frame';
+    cameraRunning = true;
+    startQuagga(video, statusEl);
+  });
 }
 
 function startQuagga(video, statusEl) {
@@ -470,7 +452,6 @@ function startQuagga(video, statusEl) {
     frequency: 6,
   }, err => {
     if (!err) Quagga.start();
-    // Video still shows even if Quagga fails
   });
 
   Quagga.onDetected(result => {
@@ -494,9 +475,17 @@ function stopCamera() {
   if (!cameraRunning) return;
   try { Quagga.stop(); } catch {}
   quaggaStarted = false;
+  const video = document.getElementById('cam-video');
+  if (video) { video.srcObject = null; }
   if (videoStream) {
     videoStream.getTracks().forEach(t => t.stop());
     videoStream = null;
+  }
+  // reset loading overlay for next open
+  const loading = document.getElementById('cam-loading');
+  if (loading) {
+    loading.style.display = 'flex';
+    loading.innerHTML = '<div class="spinner"></div><span style="color:#888;font-size:13px">Starting camera...</span>';
   }
   cameraRunning = false;
 }
